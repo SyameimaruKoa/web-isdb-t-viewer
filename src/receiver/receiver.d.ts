@@ -41,6 +41,7 @@ export interface ReceiverState {
   programInformation: ProgramInformation | null;
   status: string;
   connected: boolean;
+  tuner: 'FC0012' | 'R820T' | null;
   busy: boolean;
   running: boolean;
   error: string;
