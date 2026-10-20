@@ -91,6 +91,8 @@ export class Receiver {
     this.state.stream?.close();
     for (const job of this.jobs) job.cancel();
     this.jobs.clear();
+    this.decoderWorker?.terminate();
+    this.decoderWorker = null;
     const device = this.device;
     this.device = null;
     if (this.onDisconnect) this.usb?.removeEventListener('disconnect', this.onDisconnect);
@@ -116,20 +118,32 @@ export class Receiver {
   }
   analyze(bytes, options, monitor = false) {
     return new Promise((resolve, reject) => {
-      const worker = new Worker(new URL('./worker.js', import.meta.url), { type: 'module' });
-      const finish = () => {
+      // The main decoder is sequential and keeps its Worker (and GPU device)
+      // across IQ windows. Spectrum-only monitoring has a separate Worker.
+      const worker = monitor
+        ? new Worker(new URL('./worker.js', import.meta.url), { type: 'module' })
+        : (this.decoderWorker ??= new Worker(new URL('./worker.js', import.meta.url), { type: 'module' }));
+      let settled = false;
+      const finish = (terminate = false) => {
+        if (settled) return;
+        settled = true;
         clearTimeout(timer);
-        worker.terminate();
+        if (monitor || terminate) {
+          worker.terminate();
+          if (this.decoderWorker === worker) this.decoderWorker = null;
+        }
+        worker.onmessage = null;
+        worker.onerror = null;
         this.jobs.delete(job);
       };
       const job = {
         cancel: () => {
-          finish();
+          finish(true);
           reject(new Error('Cancelled'));
         },
       };
       const timer = setTimeout(() => {
-        finish();
+        finish(true);
         reject(new Error('Decoder timed out'));
       }, 90000);
       this.jobs.add(job);
@@ -143,7 +157,7 @@ export class Receiver {
         else resolve(data.result);
       };
       worker.onerror = (event) => {
-        finish();
+        finish(true);
         reject(new Error(event.message || 'Decoder worker failed'));
       };
       worker.postMessage({ buffer: bytes.buffer, options }, [bytes.buffer]);
@@ -233,7 +247,13 @@ export class Receiver {
             });
         }
         if (index === count) {
-          if (this.pending) this.emit({ dropped: this.state.dropped + 1 });
+          if (this.pending) {
+            this.emit({ dropped: this.state.dropped + 1 });
+            console.warn('[ISDB-T] Capture dropped: decoder backlog', {
+              droppedWindows: this.state.dropped,
+              lastDecodeMs: Math.round(this.state.decodeMs),
+            });
+          }
           const overlap = bytes.slice(stride * block * 2);
           this.pending = { bytes, options, capturedAt };
           void this.drain(epoch);
@@ -261,7 +281,16 @@ export class Receiver {
           const decodeStarted = performance.now();
           const result = await this.analyze(capture.bytes, capture.options);
           if (epoch !== this.epoch) return;
-          this.emit({ result, decodeMs: performance.now() - decodeStarted });
+          const wallMs = performance.now() - decodeStarted;
+          console.info('[ISDB-T] Capture completed', {
+            wallMs: Math.round(wallMs),
+            computeMs: Math.round(result.profile?.totalMs ?? wallMs),
+            gpu: result.profile?.backend ?? 'unknown',
+            stages: result.profile ?? {},
+            droppedWindows: this.state.dropped,
+            capturedAgeSeconds: Math.round((Date.now() - capture.capturedAt) / 100) / 10,
+          });
+          this.emit({ result, decodeMs: wallMs });
           if (!result.transport.bytes.length) {
             this.emit({ status: 'Searching', error: result.transport.error });
             continue;

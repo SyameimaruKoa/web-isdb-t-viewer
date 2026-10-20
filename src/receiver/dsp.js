@@ -82,7 +82,7 @@ function spectrum(re, im, sampleRate, offset) {
 const RESAMPLE_PHASES = 1024;
 const RESAMPLE_TAPS = 64;
 let resampleTable;
-function getResampleTable() {
+export function getResampleTable() {
   if (resampleTable) return resampleTable;
   const table = new Float64Array(RESAMPLE_PHASES * RESAMPLE_TAPS);
   const half = RESAMPLE_TAPS / 2,
@@ -348,11 +348,13 @@ export function equalize(spectra, retainCarriers = false) {
   };
 }
 
-export function analyzeIQ(
+export function prepareIQ(
   bytes,
   { sampleRate = SAMPLE_RATE, offset = TUNER_OFFSET, decode = false } = {},
   progress = () => {},
+  timing = {},
 ) {
+  const started = performance.now();
   if (
     !(bytes instanceof Uint8Array) ||
     bytes.length % 2 ||
@@ -388,19 +390,29 @@ export function analyzeIQ(
     re[i] -= mr;
     im[i] -= mi;
   }
+  timing.prepareMs = performance.now() - started;
+  const spectrumStart = performance.now();
   const psd = spectrum(re, im, sampleRate, offset);
-  mixFrequency(re, im, sampleRate, offset);
-  const [r, q] = resample(re, im, sampleRate);
+  timing.spectrumMs = performance.now() - spectrumStart;
+  return { re, im, psd, sampleRate, offset, decode, clippedPercent: (100 * clipped) / bytes.length };
+}
+
+export function completeIQ(prepared, r, q, progress = () => {}, timing = {}) {
+  const { psd, sampleRate, offset, decode, clippedPercent } = prepared;
+  let stepStart = performance.now();
   progress('OFDM synchronization');
   const sync = synchronize(r, q);
+  timing.synchronizeMs = performance.now() - stepStart;
+  stepStart = performance.now();
   progress('Pilot search and equalization');
   const eq = equalize(sync.spectra, decode);
+  timing.equalizeMs = performance.now() - stepStart;
   const metrics = {
     mode: 3,
     sampleRate,
     offset,
     symbols: sync.spectra.length,
-    clippedPercent: (100 * clipped) / bytes.length,
+    clippedPercent,
     ...sync.metrics,
     ...eq.metrics,
   };
@@ -416,4 +428,19 @@ export function analyzeIQ(
     points: eq.points,
     metrics,
   };
+}
+export function analyzeIQ(
+  bytes,
+  options = {},
+  progress = () => {},
+) {
+  const timing = {};
+  const prepared = prepareIQ(bytes, options, progress, timing);
+  const step = performance.now();
+  mixFrequency(prepared.re, prepared.im, prepared.sampleRate, prepared.offset);
+  timing.mixMs = performance.now() - step;
+  const resampleStart = performance.now();
+  const [r, q] = resample(prepared.re, prepared.im, prepared.sampleRate);
+  timing.resampleMs = performance.now() - resampleStart;
+  return completeIQ(prepared, r, q, progress, timing);
 }

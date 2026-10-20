@@ -160,3 +160,18 @@ test('optimized 64-tap resampler agrees with the reference at edges and interior
     }
   }
 });
+
+test('refactored IQ pipeline exposes reusable filter coefficients', async () => {
+  const { getResampleTable, prepareIQ, completeIQ, resample, mixFrequency } =
+    await import('../src/receiver/dsp.js');
+  const source = new Uint8Array(2048000).fill(128);
+  const timing = {};
+  const prep = prepareIQ(source, {}, () => {}, timing);
+  assert.equal(getResampleTable().length, 1024 * 64);
+  assert.ok(timing.prepareMs >= 0 && timing.spectrumMs >= 0);
+  mixFrequency(prep.re, prep.im, prep.sampleRate, prep.offset);
+  const [r, q] = resample(prep.re, prep.im, prep.sampleRate);
+  const result = completeIQ(prep, r, q, () => {}, timing);
+  assert.equal(result.metrics.locked, false);
+  assert.ok(timing.synchronizeMs >= 0 && timing.equalizeMs >= 0);
+});

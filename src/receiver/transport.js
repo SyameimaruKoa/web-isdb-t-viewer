@@ -179,8 +179,10 @@ export function decodePackets(alignment, rateIndex) {
   output.forEach((p, i) => ts.set(p, i * 188));
   return { bytes: ts, ...stats };
 }
-export function decodeTransport(carriers, metrics, progress = () => {}) {
+export function decodeTransport(carriers, metrics, progress = () => {}, profile = {}) {
+  let started = performance.now();
   const tmcc = decodeTMCC(carriers);
+  profile.tmccMs = performance.now() - started;
   const frame = tmcc.frames[0];
   const info = { tmccFrames: tmcc.frames.length, parameters: frame || null };
   if (!frame) return { ...info, bytes: new Uint8Array(), error: 'No parity-validated TMCC frame' };
@@ -197,16 +199,23 @@ export function decodeTransport(carriers, metrics, progress = () => {}) {
       error: 'Unsupported broadcast: requires partial-reception QPSK, one-segment layer A',
     };
   progress(`Time deinterleaving I=${frame.interleave}`);
+  started = performance.now();
   const soft = deinterleave(carriers, metrics.firstSpPhase, frame.interleave);
+  profile.deinterleaveMs = performance.now() - started;
   let best = { score: 0 };
   // Rank the puncturing phases using a short sample of TS sync markers.
   // If the leading sample is noisy, the full search below still tries every phase.
   const phases = [1, 4, 6, 10, 14][frame.rateIndex];
   const probeLength = Math.min(soft.length, 393216);
+  profile.probeMs = 0;
+  profile.viterbiMs = 0;
+  profile.syncSearchMs = 0;
+  profile.viterbiPhases = 0;
   let order = Array.from({ length: phases }, (_, phase) => phase);
   if (phases > 1 && probeLength < soft.length) {
     progress('Finding Viterbi puncture phase');
     const prefix = soft.subarray(0, probeLength);
+    started = performance.now();
     order = order
       .map((phase) => ({
         phase,
@@ -214,11 +223,17 @@ export function decodeTransport(carriers, metrics, progress = () => {}) {
       }))
       .sort((a, b) => b.score - a.score)
       .map(({ phase }) => phase);
+    profile.probeMs = performance.now() - started;
   }
   for (const phase of order) {
     progress(`Viterbi decoding phase ${phase + 1}/${phases}`);
-    const bits = viterbi(soft, frame.rateIndex, phase),
-      alignment = packetAlignment(bits);
+    started = performance.now();
+    const bits = viterbi(soft, frame.rateIndex, phase);
+    profile.viterbiMs += performance.now() - started;
+    started = performance.now();
+    const alignment = packetAlignment(bits);
+    profile.syncSearchMs += performance.now() - started;
+    profile.viterbiPhases++;
     if (alignment.score > best.score) best = { ...alignment, puncturePhase: phase };
     if (alignment.score > 0.85) break;
   }
@@ -227,5 +242,8 @@ export function decodeTransport(carriers, metrics, progress = () => {}) {
   if (best.score < 0.15)
     return { ...info, bytes: new Uint8Array(), error: 'No transport packet synchronization' };
   progress('Byte deinterleaving and RS correction');
-  return { ...info, ...decodePackets(best, frame.rateIndex) };
+  started = performance.now();
+  const output = decodePackets(best, frame.rateIndex);
+  profile.rsMs = performance.now() - started;
+  return { ...info, ...output };
 }
