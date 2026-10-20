@@ -31,6 +31,13 @@ const gainOptions = [
   { value: 'auto', label: 'Auto' },
   ...gains.map((gain) => ({ value: String(gain), label: `${gain.toFixed(1)} dB` })),
 ];
+const fc0012GainOptions = [
+  { value: 'auto', label: 'Auto' },
+  ...[-9.9, -4.0, 7.1, 17.9, 19.2].map((gain) => ({
+    value: String(gain),
+    label: `${gain.toFixed(1)} dB`,
+  })),
+];
 const format = (value: number | null | undefined, unit = '', decimals = 1) =>
   value != null && Number.isFinite(value) ? `${value.toFixed(decimals)}${unit}` : '—';
 function preference(key: string, fallback: string, choices: { value: string }[]) {
@@ -45,7 +52,7 @@ function App() {
   const [state, setState] = useState(initialState);
   const [receiver] = useState(() => new Receiver(setState));
   const [channel, setChannel] = useState(() => preference('isdb-channel', '27', channelOptions));
-  const [gain, setGain] = useState(() => preference('isdb-gain', '20.7', gainOptions));
+  const [gain, setGain] = useState(() => preference('isdb-gain', '20.7', [...gainOptions, ...fc0012GainOptions]));
   const logs = useRef<HTMLPreElement>(null);
   const followLogs = useRef(true);
   const receptionRequested = useRef(false);
@@ -84,6 +91,10 @@ function App() {
     if (logs.current && followLogs.current) logs.current.scrollTop = logs.current.scrollHeight;
   }, [state.logs]);
   const actionDisabled = state.busy || state.running;
+  const tunerGainOptions = state.tuner === 'FC0012' ? fc0012GainOptions : gainOptions;
+  const displayedGain = tunerGainOptions.some((option) => option.value === gain)
+    ? gain
+    : state.tuner === 'FC0012' ? '19.2' : '20.7';
   const metrics = state.result?.metrics,
     transport = state.result?.transport;
   const queueReception = (restart: boolean) => {
@@ -155,8 +166,8 @@ function App() {
             <Select
               label="Tuner gain"
               labelProps={{ mb: 'xs' }}
-              data={gainOptions}
-              value={gain}
+              data={tunerGainOptions}
+              value={displayedGain}
               onChange={(value) => {
                 if (!value) return;
                 selectedConfiguration.current = { ...selectedConfiguration.current, gain: value };

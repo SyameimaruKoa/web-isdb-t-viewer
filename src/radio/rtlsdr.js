@@ -47,6 +47,10 @@ RtlSdr.prototype.open = async function (options = {}) {
   }
 };
 
+RtlSdr.prototype.getTunerType = function () {
+  return this._rtl2832u?.getTunerType() ?? null;
+};
+
 RtlSdr.prototype.setSampleRate = async function (sampleRate) {
   return await this._rtl2832u.setSampleRate(sampleRate);
 };

@@ -15,6 +15,7 @@
 // limitations under the License.
 
 import R820T from './r820t.js';
+import FC0012 from './fc0012.js';
 import RtlCom from './rtlcom.js';
 
 var CMD = RtlCom.CMD;
@@ -53,6 +54,7 @@ export default function RTL2832U(conn, ppm, opt_gain) {
    * The tuner used by the dongle.
    */
   var tuner;
+  var tunerType = null;
 
   /**
    * Initialize the demodulator.
@@ -110,25 +112,54 @@ export default function RTL2832U(conn, ppm, opt_gain) {
 
     var xtalFreq = Math.floor(XTAL_FREQ * (1 + ppm / 1000000));
     await com.i2c.open();
-    var found = await R820T.check(com);
-    if (found) {
-      tuner = new R820T(com, xtalFreq);
+    // An absent I2C target can stall a WebUSB control transfer.
+    // Probe FC0012 first to avoid the R820T-specific request on this hardware.
+    var fc0012Found = false;
+    try {
+      fc0012Found = await FC0012.check(com);
+    } catch (_error) {
+      // A different tuner may NACK the request.
+    }
+    if (fc0012Found) {
+      tuner = new FC0012(com, xtalFreq);
+      tunerType = 'FC0012';
+      await com.gpio.setOutput(6);
+    } else {
+      var r820tFound = false;
+      try {
+        r820tFound = await R820T.check(com);
+      } catch (_error) {
+        // A different tuner may NACK the request.
+      }
+      if (r820tFound) {
+        tuner = new R820T(com, xtalFreq);
+        tunerType = 'R820T';
+      }
     }
     if (!tuner) {
-      throw new Error(
-        'Sorry, your USB dongle has an unsupported tuner chip. ' +
-          'Only the R820T chip is supported.',
-      );
+      throw new Error('No compatible FC0012 or R820T tuner detected.');
     }
-    var multiplier = -1 * Math.floor((IF_FREQ * (1 << 22)) / xtalFreq);
-    await com.writeEach([
-      [CMD.DEMODREG, 1, 0xb1, 0x1a, 1],
-      [CMD.DEMODREG, 0, 0x08, 0x4d, 1],
-      [CMD.DEMODREG, 1, 0x19, (multiplier >> 16) & 0x3f, 1],
-      [CMD.DEMODREG, 1, 0x1a, (multiplier >> 8) & 0xff, 1],
-      [CMD.DEMODREG, 1, 0x1b, multiplier & 0xff, 1],
-      [CMD.DEMODREG, 1, 0x15, 0x01, 1],
-    ]);
+    if (tunerType === 'FC0012') {
+      // FC0012 uses zero-IF I/Q rather than the R820T's 3.57 MHz IF.
+      await com.writeEach([
+        [CMD.DEMODREG, 1, 0xb1, 0x1b, 1],
+        [CMD.DEMODREG, 0, 0x08, 0xcd, 1],
+        [CMD.DEMODREG, 1, 0x19, 0x00, 1],
+        [CMD.DEMODREG, 1, 0x1a, 0x00, 1],
+        [CMD.DEMODREG, 1, 0x1b, 0x00, 1],
+        [CMD.DEMODREG, 1, 0x15, 0x00, 1],
+      ]);
+    } else {
+      var multiplier = -1 * Math.floor((IF_FREQ * (1 << 22)) / xtalFreq);
+      await com.writeEach([
+        [CMD.DEMODREG, 1, 0xb1, 0x1a, 1],
+        [CMD.DEMODREG, 0, 0x08, 0x4d, 1],
+        [CMD.DEMODREG, 1, 0x19, (multiplier >> 16) & 0x3f, 1],
+        [CMD.DEMODREG, 1, 0x1a, (multiplier >> 8) & 0xff, 1],
+        [CMD.DEMODREG, 1, 0x1b, multiplier & 0xff, 1],
+        [CMD.DEMODREG, 1, 0x15, 0x01, 1],
+      ]);
+    }
     await tuner.init();
     await setGain(opt_gain);
     await com.i2c.close();
@@ -184,9 +215,10 @@ export default function RTL2832U(conn, ppm, opt_gain) {
    */
   async function setCenterFrequency(freq) {
     await com.i2c.open();
-    var actualFreq = await tuner.setFrequency(freq + IF_FREQ);
+    var ifFreq = tunerType === 'FC0012' ? 0 : IF_FREQ;
+    var actualFreq = await tuner.setFrequency(freq + ifFreq);
     await com.i2c.close();
-    return actualFreq - IF_FREQ;
+    return actualFreq - ifFreq;
   }
 
   /**
@@ -222,6 +254,7 @@ export default function RTL2832U(conn, ppm, opt_gain) {
 
   return {
     open: open,
+    getTunerType: () => tunerType,
     setGain: async function (gain) {
       await com.i2c.open();
       try {

@@ -391,6 +391,20 @@ export default function RtlCom(conn) {
     bulk: {
       readBuffer: readBulk,
     },
+    gpio: {
+      setOutput: async function (pin) {
+        const mask = 1 << pin;
+        const direction = await readReg(BLOCK.SYS, REG.GPD, 1);
+        await writeReg(BLOCK.SYS, REG.GPD, direction & ~mask, 1);
+        const enabled = await readReg(BLOCK.SYS, REG.GPOE, 1);
+        await writeReg(BLOCK.SYS, REG.GPOE, enabled | mask, 1);
+      },
+      setBit: async function (pin, high) {
+        const mask = 1 << pin;
+        const output = await readReg(BLOCK.SYS, REG.GPO, 1);
+        await writeReg(BLOCK.SYS, REG.GPO, high ? output | mask : output & ~mask, 1);
+      },
+    },
     iface: {
       claim: claimInterface,
       release: releaseInterface,
@@ -427,6 +441,9 @@ var REG = {
   EPA_CTL: 0x2148,
   EPA_MAXPKT: 0x2158,
   DEMOD_CTL: 0x3000,
+  GPO: 0x3001,
+  GPOE: 0x3003,
+  GPD: 0x3004,
   DEMOD_CTL_1: 0x300b,
 };
 

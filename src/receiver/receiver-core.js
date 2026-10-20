@@ -8,6 +8,7 @@ import { SAMPLE_RATE, TUNER_OFFSET } from './dsp.js';
 export const initialState = {
   status: 'Disconnected',
   connected: false,
+  tuner: null,
   busy: false,
   running: false,
   error: '',
@@ -71,7 +72,7 @@ export class Receiver {
         void this.stop();
       };
       this.usb?.addEventListener('disconnect', this.onDisconnect);
-      this.emit({ connected: true, status: 'Ready' });
+      this.emit({ connected: true, tuner: device.getTunerType(), status: 'Ready' });
     } catch (error) {
       await device?.abort().catch(() => {});
       if (epoch === this.epoch)
@@ -97,6 +98,7 @@ export class Receiver {
     this.emit({
       running: false,
       connected: false,
+      tuner: null,
       busy: true,
       status: 'Stopping',
       progress: 0,
