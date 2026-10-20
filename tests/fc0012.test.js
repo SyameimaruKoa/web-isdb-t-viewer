@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import FC0012, { FC0012_GAINS } from '../src/radio/fc0012.js';
+import { detectTuner } from '../src/radio/rtl2823u.js';
 
 function mockCom(chipId = 0xa1) {
     const writes = [];
@@ -62,4 +63,55 @@ test('FC0012 gain controls handle all 5 device-supported gains', async () => {
     assert.deepEqual(values, [0x02, 0x00, 0x08, 0x17, 0x10]);
     await tuner.setAutoGain();
     assert.deepEqual(com.writes.slice(-2), [[0x0d, 0x02], [0x13, 0x00]]);
+});
+
+test('FC0012 detection retries after the upstream GPIO4 tuner-reset sequence', async () => {
+    let reads = 0;
+    const pins = [];
+    const com = {
+        i2c: {
+            readRegister: async (addr, reg) => {
+                assert.equal(addr, 0xc6);
+                assert.equal(reg, 0);
+                return ++reads === 1 ? 0xff : 0xa1;
+            },
+        },
+        gpio: {
+            setOutput: async (pin) => pins.push(['output', pin]),
+            setBit: async (pin, level) => pins.push(['bit', pin, level]),
+        },
+    };
+    const detected = await detectTuner(com);
+    assert.equal(detected.type, 'FC0012');
+    assert.equal(reads, 2);
+    assert.deepEqual(pins, [['output', 4], ['bit', 4, true], ['bit', 4, false]]);
+    assert.equal(detected.attempts[0].chipId, '0xff');
+    assert.equal(detected.attempts[2].chipId, '0xa1');
+});
+
+test('FC0012 first-pass detection does not reset a healthy tuner', async () => {
+    const pins = [];
+    const com = {
+        i2c: { readRegister: async () => 0xa1 },
+        gpio: { setOutput: async (pin) => pins.push(pin) },
+    };
+    const detected = await detectTuner(com);
+    assert.equal(detected.type, 'FC0012');
+    assert.deepEqual(pins, []);
+    assert.equal(detected.attempts.length, 1);
+});
+
+test('tuner failures preserve I2C and reset diagnostics', async () => {
+    const com = {
+        i2c: { readRegister: async () => { throw new Error('USB I2C stalled'); } },
+        gpio: {
+            setOutput: async () => {},
+            setBit: async () => { throw new Error('GPIO unavailable'); },
+        },
+    };
+    const detected = await detectTuner(com);
+    assert.equal(detected.type, null);
+    assert.match(detected.attempts[0].error, /USB I2C stalled/);
+    assert.match(detected.attempts[1].error, /GPIO unavailable/);
+    assert.match(detected.attempts[2].error, /USB I2C stalled/);
 });

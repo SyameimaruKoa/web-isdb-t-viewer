@@ -5,8 +5,10 @@
 // References: https://github.com/osmocom/rtl-sdr/blob/master/src/tuner_fc0012.c
 //             https://github.com/osmocom/rtl-sdr/blob/master/src/librtlsdr.c
 
-const I2C_ADDRESS = 0xc6;
-const IDENTIFICATION = 0xa1;
+export const FC0012_I2C_ADDRESS = 0xc6;
+export const FC0012_CHIP_ID = 0xa1;
+const I2C_ADDRESS = FC0012_I2C_ADDRESS;
+const IDENTIFICATION = FC0012_CHIP_ID;
 
 export const FC0012_GAINS = [-9.9, -4.0, 7.1, 17.9, 19.2];
 

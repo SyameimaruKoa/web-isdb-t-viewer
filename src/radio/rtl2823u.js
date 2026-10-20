@@ -15,12 +15,59 @@
 // limitations under the License.
 
 import R820T from './r820t.js';
-import FC0012 from './fc0012.js';
+import FC0012, { FC0012_CHIP_ID, FC0012_I2C_ADDRESS } from './fc0012.js';
 import RtlCom from './rtlcom.js';
 
 var CMD = RtlCom.CMD;
 var BLOCK = RtlCom.BLOCK;
 var REG = RtlCom.REG;
+
+/**
+ * Detect supported tuners with a diagnostic trace.
+ *
+ * FC0012 boards can remain held in reset after an interrupted prior session.
+ * librtlsdr toggles GPIO4 (the tuner reset line) before probing FC0012.
+ * Start with a non-disruptive probe, then perform the upstream reset sequence
+ * only if the first check failed. Never assume that the device is FC0012
+ * solely from its RTL2832U USB ID.
+ */
+export async function detectTuner(com) {
+  const attempts = [];
+  const readFC0012 = async (name) => {
+    try {
+      const chipId = await com.i2c.readRegister(FC0012_I2C_ADDRESS, 0x00);
+      const found = chipId === FC0012_CHIP_ID;
+      attempts.push({ step: name, chipId: '0x' + chipId.toString(16).padStart(2, '0'), found });
+      return found;
+    } catch (error) {
+      attempts.push({ step: name, error: error instanceof Error ? error.message : String(error) });
+      return false;
+    }
+  };
+  if (await readFC0012('FC0012 initial probe')) return { type: 'FC0012', attempts };
+
+  let resetSucceeded = false;
+  try {
+    await com.gpio.setOutput(4);
+    await com.gpio.setBit(4, true);
+    await com.gpio.setBit(4, false);
+    resetSucceeded = true;
+    attempts.push({ step: 'GPIO4 tuner reset', completed: true });
+  } catch (error) {
+    attempts.push({ step: 'GPIO4 tuner reset', error: error instanceof Error ? error.message : String(error) });
+  }
+  if (resetSucceeded && await readFC0012('FC0012 after GPIO4 reset'))
+    return { type: 'FC0012', attempts };
+
+  try {
+    const found = await R820T.check(com);
+    attempts.push({ step: 'R820T probe', found });
+    if (found) return { type: 'R820T', attempts };
+  } catch (error) {
+    attempts.push({ step: 'R820T probe', error: error instanceof Error ? error.message : String(error) });
+  }
+  return { type: null, attempts };
+}
 
 /**
  * Operations on the RTL2832U demodulator.
@@ -112,32 +159,17 @@ export default function RTL2832U(conn, ppm, opt_gain) {
 
     var xtalFreq = Math.floor(XTAL_FREQ * (1 + ppm / 1000000));
     await com.i2c.open();
-    // An absent I2C target can stall a WebUSB control transfer.
-    // Probe FC0012 first to avoid the R820T-specific request on this hardware.
-    var fc0012Found = false;
-    try {
-      fc0012Found = await FC0012.check(com);
-    } catch (_error) {
-      // A different tuner may NACK the request.
-    }
-    if (fc0012Found) {
+    const detection = await detectTuner(com);
+    console.info('[ISDB-T] RTL2832U tuner probe', detection);
+    if (detection.type === 'FC0012') {
       tuner = new FC0012(com, xtalFreq);
       tunerType = 'FC0012';
       await com.gpio.setOutput(6);
+    } else if (detection.type === 'R820T') {
+      tuner = new R820T(com, xtalFreq);
+      tunerType = 'R820T';
     } else {
-      var r820tFound = false;
-      try {
-        r820tFound = await R820T.check(com);
-      } catch (_error) {
-        // A different tuner may NACK the request.
-      }
-      if (r820tFound) {
-        tuner = new R820T(com, xtalFreq);
-        tunerType = 'R820T';
-      }
-    }
-    if (!tuner) {
-      throw new Error('No compatible FC0012 or R820T tuner detected.');
+      throw new Error('No compatible FC0012 or R820T tuner detected. See [ISDB-T] RTL2832U tuner probe in Console; reconnect the USB tuner if GPIO4 reset failed.');
     }
     if (tunerType === 'FC0012') {
       // FC0012 uses zero-IF I/Q rather than the R820T's 3.57 MHz IF.
