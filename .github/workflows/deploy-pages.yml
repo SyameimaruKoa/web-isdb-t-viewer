@@ -36,6 +36,12 @@ jobs:
 
       - name: Set up GitHub Pages
         uses: actions/configure-pages@v5
+        with:
+          # The first deployment can create the Pages site when PAGES_TOKEN exists.
+          # A fine-grained PAT needs Pages: write permission for this repository.
+          # GITHUB_TOKEN can still configure an already-enabled Pages site.
+          token: ${{ secrets.PAGES_TOKEN || github.token }}
+          enablement: true
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
