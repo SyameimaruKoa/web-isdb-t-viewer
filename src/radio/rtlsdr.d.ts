@@ -5,6 +5,7 @@ type RtlSdrOpenOptions = {
 
 type RtlSdrDevice = {
   open: (options: RtlSdrOpenOptions) => Promise<void>;
+  getTunerType: () => 'FC0012' | 'R820T' | null;
   setGain: (gain: number | null) => Promise<void>;
   abort: () => Promise<void>;
   setSampleRate: (sampleRate: number) => Promise<number>;
