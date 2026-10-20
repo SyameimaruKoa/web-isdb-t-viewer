@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { rsEncode, rsDecode, viterbi, PUNCTURE } from '../src/receiver/fec.js';
-import { decodeTransport } from '../src/receiver/transport.js';
+import { decodeTransport, packetAlignment } from '../src/receiver/transport.js';
 
 test('RS(204,188) corrects up to eight damaged bytes', () => {
   const source = Uint8Array.from({ length: 188 }, (_, i) => (i * 37 + 11) % 256);
@@ -51,4 +51,19 @@ test('Viterbi restores punctured convolutional data at all five rates', () => {
     const decoded = viterbi(soft, rate);
     assert.deepEqual(decoded, bits.subarray(0, decoded.length));
   }
+});
+
+test('packet alignment finds a perfect 204-byte transport stream', () => {
+  const bytes = new Uint8Array(204 * 60);
+  for (let p = 0; p < 60; p++) {
+    bytes[p * 204] = 0x47;
+    for (let i = 1; i < 204; i++) bytes[p * 204 + i] = (p * 73 + i * 37) & 255;
+  }
+  const bits = new Uint8Array(bytes.length * 8);
+  for (let i = 0; i < bits.length; i++)
+    bits[i] = (bytes[i >>> 3] >>> (7 - (i & 7))) & 1;
+  const result = packetAlignment(bits);
+  assert.equal(result.score, 1);
+  assert.equal(result.sync, 0);
+  assert.equal(result.shift, 0);
 });

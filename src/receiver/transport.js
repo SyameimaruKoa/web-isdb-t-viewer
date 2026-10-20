@@ -102,6 +102,8 @@ export function packetAlignment(bits) {
       }
       const score = hits / Math.max(1, total);
       if (score > best.score) best = { score, shift, sync: position, bytes };
+      // A perfect alignment cannot be improved by trying the other shifts.
+      if (score === 1) return best;
     }
   }
   return best;
@@ -197,10 +199,24 @@ export function decodeTransport(carriers, metrics, progress = () => {}) {
   progress(`Time deinterleaving I=${frame.interleave}`);
   const soft = deinterleave(carriers, metrics.firstSpPhase, frame.interleave);
   let best = { score: 0 };
-  // Unknown puncture phase after removing the acquisition transient.
-  const puncturePhases = [1, 4, 6, 10, 14][frame.rateIndex];
-  for (let phase = 0; phase < puncturePhases; phase++) {
-    progress(`Viterbi decoding ${phase + 1}/${puncturePhases}`);
+  // Rank the puncturing phases using a short sample of TS sync markers.
+  // If the leading sample is noisy, the full search below still tries every phase.
+  const phases = [1, 4, 6, 10, 14][frame.rateIndex];
+  const probeLength = Math.min(soft.length, 393216);
+  let order = Array.from({ length: phases }, (_, phase) => phase);
+  if (phases > 1 && probeLength < soft.length) {
+    progress('Finding Viterbi puncture phase');
+    const prefix = soft.subarray(0, probeLength);
+    order = order
+      .map((phase) => ({
+        phase,
+        score: packetAlignment(viterbi(prefix, frame.rateIndex, phase)).score,
+      }))
+      .sort((a, b) => b.score - a.score)
+      .map(({ phase }) => phase);
+  }
+  for (const phase of order) {
+    progress(`Viterbi decoding phase ${phase + 1}/${phases}`);
     const bits = viterbi(soft, frame.rateIndex, phase),
       alignment = packetAlignment(bits);
     if (alignment.score > best.score) best = { ...alignment, puncturePhase: phase };

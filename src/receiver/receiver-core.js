@@ -216,7 +216,8 @@ export class Receiver {
         reads.push(read());
         bytes.set(new Uint8Array(packet.data), index++ * block * 2);
         if (index % 16 === 0) this.emit({ progress: (index / count) * 100 });
-        if (index % 64 === 0 && !monitoring) {
+        // Do not contend with the full decoder for CPU cores.
+        if (index % 64 === 0 && !monitoring && !this.processing) {
           monitoring = true;
           const sample = bytes.slice((index - 32) * block * 2, index * block * 2);
           void this.analyze(sample, { ...options, decode: false }, true)
