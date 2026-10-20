@@ -77,25 +77,35 @@ function spectrum(re, im, sampleRate, offset) {
   return { x, y };
 }
 
-// 64-tap windowed-sinc fractional resampler, 1024 precomputed phases.
-// Low-pass cutoff .235 cycles/input sample removes energy above output Nyquist.
-function resample(re, im, sampleRate) {
-  const half = 32,
-    phases = 1024,
-    taps = 64,
+// Keep the original 64-tap windowed-sinc filter and all 1024 phases.
+// The coefficients depend only on the filter parameters, not on the IQ capture.
+const RESAMPLE_PHASES = 1024;
+const RESAMPLE_TAPS = 64;
+let resampleTable;
+function getResampleTable() {
+  if (resampleTable) return resampleTable;
+  const table = new Float64Array(RESAMPLE_PHASES * RESAMPLE_TAPS);
+  const half = RESAMPLE_TAPS / 2,
     cutoff = 0.235;
-  const table = new Float64Array(phases * taps);
-  for (let p = 0; p < phases; p++) {
+  for (let p = 0; p < RESAMPLE_PHASES; p++) {
     let sum = 0;
-    for (let t = 0; t < taps; t++) {
-      const d = t - half + 1 - p / phases;
+    for (let t = 0; t < RESAMPLE_TAPS; t++) {
+      const d = t - half + 1 - p / RESAMPLE_PHASES;
       const sinc = Math.abs(d) < 1e-12 ? 2 * cutoff : Math.sin(TAU * cutoff * d) / (Math.PI * d);
       const w = 0.42 + 0.5 * Math.cos((Math.PI * d) / half) + 0.08 * Math.cos((TAU * d) / half);
-      table[p * taps + t] = sinc * w;
+      table[p * RESAMPLE_TAPS + t] = sinc * w;
       sum += sinc * w;
     }
-    for (let t = 0; t < taps; t++) table[p * taps + t] /= sum;
+    for (let t = 0; t < RESAMPLE_TAPS; t++) table[p * RESAMPLE_TAPS + t] /= sum;
   }
+  resampleTable = table;
+  return table;
+}
+
+// Separate interior samples from the few boundary samples: the hot 64-tap
+// loop does not need to test the input bounds 64 times per output sample.
+export function resample(re, im, sampleRate) {
+  const table = getResampleTable();
   const ratio = sampleRate / ANALYSIS_RATE,
     length = Math.floor(re.length / ratio);
   const r = new Float64Array(length),
@@ -103,21 +113,57 @@ function resample(re, im, sampleRate) {
   for (let i = 0; i < length; i++) {
     const position = i * ratio,
       base = Math.floor(position);
-    const phase = Math.min(phases - 1, Math.floor((position - base) * phases));
+    const phase = Math.min(
+      RESAMPLE_PHASES - 1,
+      Math.floor((position - base) * RESAMPLE_PHASES),
+    ) * RESAMPLE_TAPS;
+    const first = base - 31;
     let a = 0,
       b = 0;
-    for (let t = 0; t < taps; t++) {
-      const j = base + t - half + 1;
-      if (j >= 0 && j < re.length) {
-        const h = table[phase * taps + t];
+    if (first >= 0 && first + RESAMPLE_TAPS <= re.length) {
+      for (let t = 0; t < RESAMPLE_TAPS; t++) {
+        const j = first + t,
+          h = table[phase + t];
         a += re[j] * h;
         b += im[j] * h;
+      }
+    } else {
+      for (let t = 0; t < RESAMPLE_TAPS; t++) {
+        const j = first + t;
+        if (j >= 0 && j < re.length) {
+          const h = table[phase + t];
+          a += re[j] * h;
+          b += im[j] * h;
+        }
       }
     }
     r[i] = a;
     q[i] = b;
   }
   return [r, q];
+}
+
+// Recurrence avoids two trigonometric calls for each of millions of samples.
+// Re-anchor every 256 samples to bound floating-point phase drift.
+export function mixFrequency(re, im, sampleRate, offset) {
+  const step = (TAU * offset) / sampleRate,
+    cr = Math.cos(step),
+    ci = Math.sin(step);
+  for (let block = 0; block < re.length; block += 256) {
+    const phase = step * block;
+    let wr = Math.cos(phase),
+      wi = Math.sin(phase);
+    const end = Math.min(block + 256, re.length);
+    for (let i = block; i < end; i++) {
+      const a = re[i],
+        b = im[i];
+      re[i] = a * wr - b * wi;
+      im[i] = a * wi + b * wr;
+      const nextWr = wr * cr - wi * ci;
+      wi = wr * ci + wi * cr;
+      wr = nextWr;
+    }
+  }
 }
 
 export function synchronize(re, im) {
@@ -140,11 +186,13 @@ export function synchronize(re, im) {
     const period = n + guard,
       blocks = Math.floor((size - guard + 1) / period);
     const folded = new Float32Array(period);
+    let phase = 0;
     for (let i = 0; i < blocks * period; i++) {
       const a = pr[i + guard] - pr[i],
         b = pi[i + guard] - pi[i];
       const denom = Math.sqrt((e1[i + guard] - e1[i]) * (e2[i + guard] - e2[i]));
-      folded[i % period] += Math.hypot(a, b) / Math.max(1e-15, denom) / blocks;
+      folded[phase] += Math.sqrt(a * a + b * b) / Math.max(1e-15, denom) / blocks;
+      if (++phase === period) phase = 0;
     }
     let timing = 0;
     for (let i = 1; i < period; i++) if (folded[i] > folded[timing]) timing = i;
@@ -341,15 +389,7 @@ export function analyzeIQ(
     im[i] -= mi;
   }
   const psd = spectrum(re, im, sampleRate, offset);
-  for (let i = 0; i < size; i++) {
-    const phase = (TAU * offset * i) / sampleRate,
-      c = Math.cos(phase),
-      s = Math.sin(phase),
-      a = re[i],
-      b = im[i];
-    re[i] = a * c - b * s;
-    im[i] = a * s + b * c;
-  }
+  mixFrequency(re, im, sampleRate, offset);
   const [r, q] = resample(re, im, sampleRate);
   progress('OFDM synchronization');
   const sync = synchronize(r, q);

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, readFileSync } from 'node:fs';
-import { fft, synchronize, equalize, analyzeIQ, ANALYSIS_RATE } from '../src/receiver/dsp.js';
+import { fft, synchronize, equalize, analyzeIQ, ANALYSIS_RATE, mixFrequency, resample } from '../src/receiver/dsp.js';
 import { channels } from '../src/receiver/channels.js';
 
 test('FFT resolves a known complex tone', () => {
@@ -104,4 +104,59 @@ test('UHF channel frequencies and malformed IQ', () => {
   assert.ok(Math.abs(channels.find((c) => c.channel === 16).center - 491142857.142857) < 0.001);
   assert.throws(() => analyzeIQ(new Uint8Array(100)));
   assert.throws(() => analyzeIQ(new Uint8Array(2048001)));
+});
+
+test('optimized IQ frequency shift agrees with the direct trigonometric reference', () => {
+  const size = 262145;
+  for (const [sampleRate, offset] of [[2048000, 400000], [2047999, 400123.25]]) {
+    const re = Float64Array.from({ length: size }, (_, i) => Math.sin(i * 0.013));
+    const im = Float64Array.from({ length: size }, (_, i) => Math.cos(i * 0.019));
+    const actualRe = re.slice(),
+      actualIm = im.slice();
+    mixFrequency(actualRe, actualIm, sampleRate, offset);
+    for (let i = 0; i < size; i += 97) {
+      const angle = (2 * Math.PI * offset * i) / sampleRate;
+      const c = Math.cos(angle),
+        s = Math.sin(angle);
+      assert.ok(Math.abs(actualRe[i] - (re[i] * c - im[i] * s)) < 1e-8);
+      assert.ok(Math.abs(actualIm[i] - (re[i] * s + im[i] * c)) < 1e-8);
+    }
+  }
+});
+
+test('optimized 64-tap resampler agrees with the reference at edges and interior', () => {
+  const re = Float64Array.from({ length: 2049 }, (_, i) => Math.sin(i * 0.1)),
+    im = Float64Array.from({ length: 2049 }, (_, i) => Math.cos(i * 0.2));
+  const half = 32, taps = 64, phases = 1024, cutoff = 0.235;
+  for (const sampleRate of [2048000, 2047999]) {
+    const ratio = sampleRate / ANALYSIS_RATE;
+    const actual = resample(re, im, sampleRate);
+    const outputLength = Math.floor(re.length / ratio);
+    assert.equal(actual[0].length, outputLength);
+    for (let i = 0; i < outputLength; i++) {
+      const position = i * ratio,
+        base = Math.floor(position),
+        phase = Math.min(phases - 1, Math.floor((position - base) * phases));
+      let sum = 0;
+      const coefficients = new Float64Array(taps);
+      for (let t = 0; t < taps; t++) {
+        const d = t - half + 1 - phase / phases;
+        const sinc = Math.abs(d) < 1e-12 ? 2 * cutoff : Math.sin(2 * Math.PI * cutoff * d) / (Math.PI * d);
+        const w = 0.42 + 0.5 * Math.cos((Math.PI * d) / half) + 0.08 * Math.cos((2 * Math.PI * d) / half);
+        coefficients[t] = sinc * w;
+        sum += coefficients[t];
+      }
+      let expectedRe = 0, expectedIm = 0;
+      for (let t = 0; t < taps; t++) {
+        const j = base + t - half + 1;
+        if (j >= 0 && j < re.length) {
+          const h = coefficients[t] / sum;
+          expectedRe += re[j] * h;
+          expectedIm += im[j] * h;
+        }
+      }
+      assert.ok(Math.abs(actual[0][i] - expectedRe) < 1e-12);
+      assert.ok(Math.abs(actual[1][i] - expectedIm) < 1e-12);
+    }
+  }
 });
